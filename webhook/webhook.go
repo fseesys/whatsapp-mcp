@@ -42,17 +42,20 @@ type MessageEventData struct {
 	SenderPushName    string          `json:"sender_push_name,omitempty"`
 	SenderContactName string          `json:"sender_contact_name,omitempty"`
 	IsGroup           bool            `json:"is_group"`
+	ReplyToID         string          `json:"reply_to_id,omitempty"`
 	MediaMetadata     *MediaReference `json:"media_metadata,omitempty"`
 	Referral          *ReferralInfo   `json:"referral,omitempty"`
 }
 
 // MediaReference contains metadata about media attachments.
 type MediaReference struct {
-	MessageID string `json:"message_id"` // Reference for API fetch
-	FileName  string `json:"file_name"`
-	FileSize  int64  `json:"file_size"`
-	MimeType  string `json:"mime_type"`
-	HasMedia  bool   `json:"has_media"`
+	MessageID      string `json:"message_id"`
+	FileName       string `json:"file_name"`
+	FileSize       int64  `json:"file_size"`
+	MimeType       string `json:"mime_type"`
+	HasMedia       bool   `json:"has_media"`
+	FilePath       string `json:"file_path,omitempty"`
+	DownloadStatus string `json:"download_status,omitempty"`
 }
 
 // deliveryTask represents a webhook delivery job.
@@ -189,16 +192,19 @@ func (m *WebhookManager) buildMessagePayload(msg storage.MessageWithNames) Webho
 		SenderPushName:    msg.SenderPushName,
 		SenderContactName: msg.SenderContactName,
 		IsGroup:           strings.Contains(msg.ChatJID, "@g.us"),
+		ReplyToID:         msg.ReplyToID,
 	}
 
 	// Add media metadata if present
 	if msg.MediaMetadata != nil {
 		data.MediaMetadata = &MediaReference{
-			MessageID: msg.MediaMetadata.MessageID,
-			FileName:  msg.MediaMetadata.FileName,
-			FileSize:  msg.MediaMetadata.FileSize,
-			MimeType:  msg.MediaMetadata.MimeType,
-			HasMedia:  msg.MediaMetadata.FilePath != "",
+			MessageID:      msg.MediaMetadata.MessageID,
+			FileName:       msg.MediaMetadata.FileName,
+			FileSize:       msg.MediaMetadata.FileSize,
+			MimeType:       msg.MediaMetadata.MimeType,
+			HasMedia:       msg.MediaMetadata.FilePath != "",
+			FilePath:       msg.MediaMetadata.FilePath,
+			DownloadStatus: msg.MediaMetadata.DownloadStatus,
 		}
 	}
 

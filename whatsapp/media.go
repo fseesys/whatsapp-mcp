@@ -176,7 +176,7 @@ func (c *Client) shouldAutoDownload(mediaType string, fileSize int64) bool {
 
 // downloadMedia downloads media from WhatsApp and saves it to disk.
 // It returns the relative file path on success.
-func (c *Client) downloadMedia(ctx context.Context, msg *waE2E.Message, meta *storage.MediaMetadata) (string, error) {
+func (c *Client) downloadMedia(ctx context.Context, msg *waE2E.Message, meta *storage.MediaMetadata, ts time.Time, chatJID string) (string, error) {
 	if msg == nil || meta == nil {
 		return "", fmt.Errorf("nil message or metadata")
 	}
@@ -199,7 +199,7 @@ func (c *Client) downloadMedia(ctx context.Context, msg *waE2E.Message, meta *st
 	}
 
 	// generate unique file path
-	filePath, err := c.generateMediaFilePath(meta)
+	filePath, err := c.generateMediaFilePath(meta, ts, chatJID)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate file path: %w", err)
 	}
@@ -266,32 +266,39 @@ func (c *Client) downloadMedia(ctx context.Context, msg *waE2E.Message, meta *st
 }
 
 // generateMediaFilePath creates a unique file path based on media metadata.
-func (c *Client) generateMediaFilePath(meta *storage.MediaMetadata) (string, error) {
-	// determine subdirectory based on MIME type
-	var subdir string
-	switch {
-	case strings.HasPrefix(meta.MimeType, "image/"):
-		subdir = "images"
-	case strings.HasPrefix(meta.MimeType, "video/"):
-		subdir = "videos"
-	case strings.HasPrefix(meta.MimeType, "audio/"):
-		subdir = "audio"
-	default:
-		subdir = "documents"
+func chatDirName(jid string) string {
+	jid = strings.TrimSpace(jid)
+	jid = strings.ReplaceAll(jid, ":", "_")
+	jid = strings.ReplaceAll(jid, "/", "_")
+	jid = strings.ReplaceAll(jid, "\\", "_")
+	jid = strings.ReplaceAll(jid, "@", "_")
+	if jid == "" {
+		return "_unknown"
 	}
+	return jid
+}
 
-	// safe filename: {message_id}_{timestamp}_{sanitized_filename}
-	timestamp := time.Now().Format("20060102_150405")
+func (c *Client) generateMediaFilePath(meta *storage.MediaMetadata, ts time.Time, chatJID string) (string, error) {
+	loc, err := time.LoadLocation(os.Getenv("TIMEZONE"))
+	if err != nil || os.Getenv("TIMEZONE") == "" {
+		loc = time.FixedZone("HKT", 8*3600)
+	}
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	local := ts.In(loc)
+	subdir := filepath.Join(chatDirName(chatJID), local.Format("2006"), local.Format("01"), local.Format("02"))
+
 	safeName := sanitizeFilename(meta.FileName)
 	if safeName == "" {
-		// fallback: use extension from MIME type
 		ext := mimeToExtension(meta.MimeType)
-		safeName = fmt.Sprintf("media_%s%s", timestamp, ext)
+		safeName = fmt.Sprintf("media%s", ext)
 	}
-
-	// ensure filename starts with message ID for uniqueness
-	fileName := fmt.Sprintf("%s_%s_%s", meta.MessageID[:min(8, len(meta.MessageID))], timestamp, safeName)
-
+	id := meta.MessageID
+	if len(id) > 24 {
+		id = id[:24]
+	}
+	fileName := fmt.Sprintf("%s-%s", id, safeName)
 	return filepath.Join(c.mediaConfig.StoragePath, subdir, fileName), nil
 }
 
@@ -321,13 +328,13 @@ func (c *Client) verifyDownload(filePath string, meta *storage.MediaMetadata) er
 
 // downloadMediaWithRetry downloads media with retry logic for transient failures.
 // It returns the relative file path on success.
-func (c *Client) downloadMediaWithRetry(ctx context.Context, msg *waE2E.Message, meta *storage.MediaMetadata) (string, error) {
+func (c *Client) downloadMediaWithRetry(ctx context.Context, msg *waE2E.Message, meta *storage.MediaMetadata, ts time.Time, chatJID string) (string, error) {
 	maxRetries := 3
 	backoff := time.Second
 	var allErrors []string
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		filePath, err := c.downloadMedia(ctx, msg, meta)
+		filePath, err := c.downloadMedia(ctx, msg, meta, ts, chatJID)
 		if err == nil {
 			return filePath, nil
 		}

@@ -379,6 +379,9 @@ func (c *Client) handleMessage(evt *events.Message) {
 
 	text := extractText(evt.Message)
 	var replyToID string
+	if q := extractQuotedID(evt.Message); q != "" {
+		replyToID = q
+	}
 	if text == "" {
 		if evt.Message.GetImageMessage() != nil {
 			text = "[Image]"
@@ -438,31 +441,28 @@ func (c *Client) handleMessage(evt *events.Message) {
 			c.log.Debugf("Saved media metadata for %s: type=%s, size=%d, status=%s",
 				info.ID, mediaMetadata.MimeType, mediaMetadata.FileSize, mediaMetadata.DownloadStatus)
 
-			// should auto-download?
+			// Download before webhook so the filer gets a real path (CDN expires later).
 			if mediaMetadata.DownloadStatus == "pending" {
 				c.log.Infof("Auto-downloading %s media (%d bytes) from %s",
 					mediaType, mediaMetadata.FileSize, info.ID)
-
-				// download asynchronously to avoid blocking message processing
-				go func(meta *storage.MediaMetadata, msgID string) {
-					downloadCtx, cancel := context.WithTimeout(c.ctx, 60*time.Second)
-					defer cancel()
-
-					filePath, err := c.downloadMediaWithRetry(downloadCtx, evt.Message, meta)
-					if err != nil {
-						c.log.Errorf("Failed to download media %s: %v", msgID, err)
-						// update status based on error type
-						if errors.Is(err, whatsmeow.ErrMediaDownloadFailedWith404) ||
-							errors.Is(err, whatsmeow.ErrMediaDownloadFailedWith410) {
-							c.mediaStore.UpdateDownloadStatus(msgID, "expired", nil, err)
-						} else {
-							c.mediaStore.UpdateDownloadStatus(msgID, "failed", nil, err)
-						}
+				downloadCtx, cancel := context.WithTimeout(c.ctx, 60*time.Second)
+				filePath, err := c.downloadMediaWithRetry(downloadCtx, evt.Message, mediaMetadata, info.Timestamp, c.normalizeJID(data.ChatJID))
+				cancel()
+				if err != nil {
+					c.log.Errorf("Failed to download media %s: %v", info.ID, err)
+					if errors.Is(err, whatsmeow.ErrMediaDownloadFailedWith404) ||
+						errors.Is(err, whatsmeow.ErrMediaDownloadFailedWith410) {
+						c.mediaStore.UpdateDownloadStatus(info.ID, "expired", nil, err)
+						mediaMetadata.DownloadStatus = "expired"
 					} else {
-						// update status with file path on success
-						c.mediaStore.UpdateDownloadStatus(msgID, "downloaded", &filePath, nil)
+						c.mediaStore.UpdateDownloadStatus(info.ID, "failed", nil, err)
+						mediaMetadata.DownloadStatus = "failed"
 					}
-				}(mediaMetadata, info.ID)
+				} else {
+					c.mediaStore.UpdateDownloadStatus(info.ID, "downloaded", &filePath, nil)
+					mediaMetadata.FilePath = filePath
+					mediaMetadata.DownloadStatus = "downloaded"
+				}
 			} else {
 				c.log.Debugf("Skipping auto-download for %s media (%d bytes) from %s (status: %s)",
 					mediaType, mediaMetadata.FileSize, info.ID, mediaMetadata.DownloadStatus)
@@ -743,7 +743,9 @@ func (c *Client) handleHistorySync(evt *events.HistorySync) {
 		if len(pendingDownloads) > 0 && c.mediaConfig.AutoDownloadFromHistory {
 			// build message lookup map once (O(M) instead of O(N*M))
 			messageByID := make(map[string]*waE2E.Message)
+			chatByMsgID := make(map[string]string)
 			for _, conv := range evt.Data.GetConversations() {
+				convJID := conv.GetID()
 				for _, histMsg := range conv.GetMessages() {
 					msg := histMsg.GetMessage()
 					if msg == nil {
@@ -762,6 +764,9 @@ func (c *Client) handleHistorySync(evt *events.HistorySync) {
 						continue
 					}
 					messageByID[id] = actualMessage
+					if convJID != "" {
+						chatByMsgID[id] = convJID
+					}
 				}
 			}
 
@@ -790,7 +795,7 @@ func (c *Client) handleHistorySync(evt *events.HistorySync) {
 					downloadCtx, cancel := context.WithTimeout(c.ctx, 60*time.Second)
 					defer cancel()
 
-					filePath, err := c.downloadMediaWithRetry(downloadCtx, actualMessage, &meta)
+					filePath, err := c.downloadMediaWithRetry(downloadCtx, actualMessage, &meta, time.Now(), chatByMsgID[meta.MessageID])
 					if err != nil {
 						c.log.Errorf("Failed to download history media %s: %v", meta.MessageID, err)
 						// update status based on error type
@@ -899,6 +904,45 @@ func extractReferral(msg *waE2E.Message) *storage.ReferralInfo {
 		SourceURL:  surl,
 		Headline:   headline,
 	}
+}
+
+// extractQuotedID returns the stanza ID of a quoted/replied message, if any.
+func extractQuotedID(msg *waE2E.Message) string {
+	if msg == nil {
+		return ""
+	}
+	fromCI := func(ci *waE2E.ContextInfo) string {
+		if ci == nil {
+			return ""
+		}
+		return ci.GetStanzaID()
+	}
+	if ext := msg.GetExtendedTextMessage(); ext != nil {
+		if id := fromCI(ext.GetContextInfo()); id != "" {
+			return id
+		}
+	}
+	if img := msg.GetImageMessage(); img != nil {
+		if id := fromCI(img.GetContextInfo()); id != "" {
+			return id
+		}
+	}
+	if vid := msg.GetVideoMessage(); vid != nil {
+		if id := fromCI(vid.GetContextInfo()); id != "" {
+			return id
+		}
+	}
+	if aud := msg.GetAudioMessage(); aud != nil {
+		if id := fromCI(aud.GetContextInfo()); id != "" {
+			return id
+		}
+	}
+	if doc := msg.GetDocumentMessage(); doc != nil {
+		if id := fromCI(doc.GetContextInfo()); id != "" {
+			return id
+		}
+	}
+	return ""
 }
 
 // extractText extracts text content from a WhatsApp message.
